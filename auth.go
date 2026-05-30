@@ -157,6 +157,31 @@ func (s MethodSpec) Normalize() MethodSpec {
 	return s
 }
 
+// Request asks runtime to obtain usable credential material for one plugin instance.
+type Request struct {
+	Plugin   string       `json:"plugin" yaml:"plugin"`
+	Instance string       `json:"instance,omitempty" yaml:"instance,omitempty"`
+	Purpose  string       `json:"purpose" yaml:"purpose"`
+	Methods  []MethodSpec `json:"methods,omitempty" yaml:"methods,omitempty"`
+}
+
+// Normalize returns a trimmed request.
+func (r Request) Normalize() Request {
+	r.Plugin = strings.TrimSpace(r.Plugin)
+	r.Instance = strings.TrimSpace(r.Instance)
+	r.Purpose = strings.TrimSpace(r.Purpose)
+	for i := range r.Methods {
+		r.Methods[i] = r.Methods[i].Normalize()
+	}
+	return r
+}
+
+// SecretRef returns the logical plugin secret protected by secret.use.
+func (r Request) SecretRef() secret.Ref {
+	r = r.Normalize()
+	return secret.Plugin(r.Plugin, r.Instance, secret.Slot(r.Purpose))
+}
+
 // ProviderSpec declares authentication options for a provider or plugin.
 type ProviderSpec struct {
 	Ref           ProviderRef       `json:"ref" yaml:"ref"`
