@@ -1,0 +1,227 @@
+package auth
+
+import (
+	"context"
+
+	"github.com/fluxplane/fluxplane-policy/policyauth"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/fluxplane/fluxplane-policy"
+	"github.com/fluxplane/fluxplane-secret"
+)
+
+func TestEnvResolverFindsEnvSecret(t *testing.T) {
+	resolver := secret.EnvResolver{Environment: mapEnvironment{"GITLAB_PERSONAL_ACCESS_TOKEN": "pat"}}
+	material, ok, err := resolver.ResolveSecret(context.Background(), secret.Env("GITLAB_PERSONAL_ACCESS_TOKEN"))
+	if err != nil || !ok || string(material.Value) != "pat" {
+		t.Fatalf("ResolveSecret = %#v, %v, %v; want pat", material, ok, err)
+	}
+}
+
+func TestBrokerMintAndResolveScopedPlaceholder(t *testing.T) {
+	broker := NewBroker(secret.EnvResolver{Environment: mapEnvironment{"GITLAB_PERSONAL_ACCESS_TOKEN": "pat"}})
+	ctx := ContextWithScope(authorizedContext(), Scope{Session: "s1", Turn: "t1"})
+	placeholder, ok, err := broker.Mint(ctx, secret.Env("GITLAB_PERSONAL_ACCESS_TOKEN"))
+	if err != nil || !ok {
+		t.Fatalf("Mint = %q, %v, %v", placeholder, ok, err)
+	}
+	handle, ok := secret.ParsePlaceholder(string(placeholder))
+	if !ok {
+		t.Fatalf("placeholder = %q", placeholder)
+	}
+	material, ok, err := broker.ResolveHandle(ctx, handle)
+	if err != nil || !ok || string(material.Value) != "pat" {
+		t.Fatalf("ResolveHandle = %#v, %v, %v; want pat", material, ok, err)
+	}
+	_, _, err = broker.ResolveHandle(ContextWithScope(authorizedContext(), Scope{Session: "other", Turn: "t1"}), handle)
+	if err == nil || !strings.Contains(err.Error(), "scope mismatch") {
+		t.Fatalf("ResolveHandle wrong scope error = %v, want scope mismatch", err)
+	}
+}
+
+func TestBrokerRequiresSecretUse(t *testing.T) {
+	broker := NewBroker(secret.EnvResolver{Environment: mapEnvironment{"GITLAB_PERSONAL_ACCESS_TOKEN": "pat"}})
+	ctx := policyauth.ContextWithAuthorization(context.Background(), policyauth.AuthorizationContext{
+		Subjects: []policy.SubjectRef{{Kind: policy.SubjectUser, ID: "timo@localhost"}},
+		Trust:    policy.Trust{Kind: policy.TrustInvocation, Level: policy.TrustPrivileged},
+		Policy: policy.AuthorizationPolicy{Grants: []policy.Grant{{
+			Subjects:      []policy.SubjectRef{{Kind: policy.SubjectUser, ID: "other"}},
+			Resources:     []policy.ResourceRef{{Kind: policy.ResourceSecret, Name: "*"}},
+			Actions:       []policy.Action{policy.ActionSecretUse},
+			RequiredTrust: policy.TrustPrivileged,
+		}}},
+	})
+	_, _, err := broker.Use(ctx, secret.Env("GITLAB_PERSONAL_ACCESS_TOKEN"))
+	if err == nil || !strings.Contains(err.Error(), "authorization_deny") {
+		t.Fatalf("Use error = %v, want authorization deny", err)
+	}
+}
+
+func TestBrokerUseFirstSkipsMissingCandidateBeforeAuthorization(t *testing.T) {
+	broker := NewBroker(secret.EnvResolver{Environment: mapEnvironment{"GITLAB_TOKEN": "fallback"}})
+	ctx := policyauth.ContextWithAuthorization(context.Background(), policyauth.AuthorizationContext{
+		Subjects: []policy.SubjectRef{{Kind: policy.SubjectUser, ID: "timo@localhost"}},
+		Trust:    policy.Trust{Kind: policy.TrustInvocation, Level: policy.TrustPrivileged},
+		Policy: policy.AuthorizationPolicy{Grants: []policy.Grant{{
+			Subjects:      []policy.SubjectRef{{Kind: policy.SubjectUser, ID: "timo@localhost"}},
+			Resources:     []policy.ResourceRef{{Kind: policy.ResourceSecret, Name: "env/GITLAB_TOKEN"}},
+			Actions:       []policy.Action{policy.ActionSecretUse},
+			RequiredTrust: policy.TrustPrivileged,
+		}}},
+	})
+	ref, material, ok, err := broker.UseFirst(ctx, secret.Env("GITLAB_PERSONAL_ACCESS_TOKEN"), secret.Env("GITLAB_TOKEN"))
+	if err != nil || !ok || ref.Slot != "GITLAB_TOKEN" || string(material.Value) != "fallback" {
+		t.Fatalf("UseFirst = %#v, %#v, %v, %v; want fallback", ref, material, ok, err)
+	}
+}
+
+func TestBrokerUseAvailableAuthorizesLogicalPluginSecret(t *testing.T) {
+	broker := NewBroker(secret.EnvResolver{Environment: mapEnvironment{"GITLAB_PERSONAL_ACCESS_TOKEN": "pat"}})
+	ctx := policyauth.ContextWithAuthorization(context.Background(), policyauth.AuthorizationContext{
+		Subjects: []policy.SubjectRef{{Kind: policy.SubjectUser, ID: "timo@localhost"}},
+		Trust:    policy.Trust{Kind: policy.TrustInvocation, Level: policy.TrustPrivileged},
+		Policy: policy.AuthorizationPolicy{Grants: []policy.Grant{{
+			Subjects:      []policy.SubjectRef{{Kind: policy.SubjectUser, ID: "timo@localhost"}},
+			Resources:     []policy.ResourceRef{{Kind: policy.ResourceSecret, Name: "plugin/gitlab/company-a/access_token"}},
+			Actions:       []policy.Action{policy.ActionSecretUse},
+			RequiredTrust: policy.TrustPrivileged,
+		}}},
+	})
+	resolution, ok, err := broker.UseAvailable(ctx, Request{
+		Plugin:   "gitlab",
+		Instance: "company-a",
+		Purpose:  "access_token",
+		Methods: []MethodSpec{{
+			Name:   "personal_access_token",
+			Method: MethodEnv,
+			Kind:   secret.KindAPIKey,
+			Env:    EnvSpec{Name: "GITLAB_PERSONAL_ACCESS_TOKEN", Aliases: []string{"GITLAB_TOKEN"}},
+		}},
+	})
+	if err != nil || !ok || resolution.Ref.ResourceName() != "env/GITLAB_PERSONAL_ACCESS_TOKEN" || string(resolution.Material.Value) != "pat" {
+		t.Fatalf("UseAvailable = %#v, %v, %v; want configured env token", resolution, ok, err)
+	}
+}
+
+func TestBrokerUseAvailableConfiguredEnvDoesNotProbeAliases(t *testing.T) {
+	broker := NewBroker(secret.EnvResolver{Environment: mapEnvironment{"GITLAB_TOKEN": "fallback"}})
+	_, ok, err := broker.UseAvailable(authorizedPluginContext(), Request{
+		Plugin:   "gitlab",
+		Instance: "company-a",
+		Purpose:  "access_token",
+		Methods: []MethodSpec{{
+			Name:   "personal_access_token",
+			Method: MethodEnv,
+			Kind:   secret.KindAPIKey,
+			Env:    EnvSpec{Name: "GITLAB_PERSONAL_ACCESS_TOKEN", Aliases: []string{"GITLAB_TOKEN"}},
+		}},
+	})
+	if err != nil || ok {
+		t.Fatalf("UseAvailable configured env aliases = %v, %v; want no material", ok, err)
+	}
+}
+
+func TestBrokerUseAvailableProbesAliasesWhenEnvNameUnset(t *testing.T) {
+	broker := NewBroker(secret.EnvResolver{Environment: mapEnvironment{"GITLAB_TOKEN": "fallback"}})
+	resolution, ok, err := broker.UseAvailable(authorizedPluginContext(), Request{
+		Plugin:   "gitlab",
+		Instance: "company-a",
+		Purpose:  "access_token",
+		Methods: []MethodSpec{{
+			Name:   "personal_access_token",
+			Method: MethodEnv,
+			Kind:   secret.KindAPIKey,
+			Env:    EnvSpec{Aliases: []string{"GITLAB_TOKEN"}},
+		}},
+	})
+	if err != nil || !ok || resolution.Ref.ResourceName() != "env/GITLAB_TOKEN" || string(resolution.Material.Value) != "fallback" {
+		t.Fatalf("UseAvailable alias probe = %#v, %v, %v; want fallback", resolution, ok, err)
+	}
+}
+
+func TestBrokerExpiresHandles(t *testing.T) {
+	broker := NewBroker(secret.EnvResolver{Environment: mapEnvironment{"GITLAB_PERSONAL_ACCESS_TOKEN": "pat"}}).WithTTL(time.Nanosecond)
+	now := time.Now()
+	broker.now = func() time.Time { return now }
+	ctx := ContextWithScope(authorizedContext(), Scope{Session: "s1", Turn: "t1"})
+	placeholder, ok, err := broker.Mint(ctx, secret.Env("GITLAB_PERSONAL_ACCESS_TOKEN"))
+	if err != nil || !ok {
+		t.Fatalf("Mint = %q, %v, %v", placeholder, ok, err)
+	}
+	handle, _ := secret.ParsePlaceholder(string(placeholder))
+	now = now.Add(time.Second)
+	_, ok, err = broker.ResolveHandle(ctx, handle)
+	if err != nil || ok {
+		t.Fatalf("ResolveHandle expired = %v, %v; want not found nil", ok, err)
+	}
+}
+
+func authorizedPluginContext() context.Context {
+	return policyauth.ContextWithAuthorization(context.Background(), policyauth.AuthorizationContext{
+		Subjects: []policy.SubjectRef{{Kind: policy.SubjectUser, ID: "timo@localhost"}},
+		Trust:    policy.Trust{Kind: policy.TrustInvocation, Level: policy.TrustPrivileged},
+		Policy: policy.AuthorizationPolicy{Grants: []policy.Grant{{
+			Subjects:      []policy.SubjectRef{{Kind: policy.SubjectUser, ID: "timo@localhost"}},
+			Resources:     []policy.ResourceRef{{Kind: policy.ResourceSecret, Name: "plugin/gitlab/company-a/access_token"}},
+			Actions:       []policy.Action{policy.ActionSecretUse},
+			RequiredTrust: policy.TrustPrivileged,
+		}}},
+	})
+}
+
+func authorizedContext() context.Context {
+	return policyauth.ContextWithAuthorization(context.Background(), policyauth.AuthorizationContext{
+		Subjects: []policy.SubjectRef{{Kind: policy.SubjectUser, ID: "timo@localhost"}},
+		Trust:    policy.Trust{Kind: policy.TrustInvocation, Level: policy.TrustPrivileged},
+		Policy: policy.AuthorizationPolicy{Grants: []policy.Grant{{
+			Subjects:      []policy.SubjectRef{{Kind: policy.SubjectUser, ID: "timo@localhost"}},
+			Resources:     []policy.ResourceRef{{Kind: policy.ResourceSecret, Name: "env/GITLAB_PERSONAL_ACCESS_TOKEN"}},
+			Actions:       []policy.Action{policy.ActionSecretUse},
+			RequiredTrust: policy.TrustPrivileged,
+		}}},
+	})
+}
+
+type mapEnvironment map[string]string
+
+func (e mapEnvironment) Lookup(_ context.Context, key string) (string, bool, error) {
+	value, ok := e[key]
+	return value, ok, nil
+}
+
+// captureCtxEnv records the context that Lookup was called with so tests
+// can verify that secret.EnvResolver propagates the caller's ctx instead of
+// substituting context.Background().
+type captureCtxEnv struct {
+	value      string
+	gotContext context.Context
+}
+
+func (e *captureCtxEnv) Lookup(ctx context.Context, _ string) (string, bool, error) {
+	e.gotContext = ctx
+	return e.value, e.value != "", nil
+}
+
+// TestEnvResolverPropagatesContext regresses a bug where
+// secret.EnvResolver.ResolveSecret used `_ context.Context` (ignoring it) and
+// then called r.Environment.Lookup(context.Background(), ...). Any
+// caller-supplied deadline / cancellation / metadata key on the
+// resolver context was silently dropped.
+func TestEnvResolverPropagatesContext(t *testing.T) {
+	env := &captureCtxEnv{value: "pat"}
+	resolver := secret.EnvResolver{Environment: env}
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "marker")
+
+	if _, _, err := resolver.ResolveSecret(ctx, secret.Env("TOKEN")); err != nil {
+		t.Fatalf("ResolveSecret: %v", err)
+	}
+	if env.gotContext == nil {
+		t.Fatal("Environment.Lookup got nil context")
+	}
+	if got, _ := env.gotContext.Value(ctxKey{}).(string); got != "marker" {
+		t.Fatalf("Environment.Lookup got ctx without caller value (was %q), want \"marker\" - resolver is substituting context.Background()", got)
+	}
+}
