@@ -4,15 +4,15 @@ import (
 	"context"
 	"testing"
 
-	coresecret "github.com/fluxplane/fluxplane-auth/authsecret"
+	"github.com/fluxplane/fluxplane-auth"
 	sharedsecret "github.com/fluxplane/fluxplane-secret"
 )
 
 func TestEvaluateUsesRequiredGroupSetupField(t *testing.T) {
 	store := sharedsecret.NewFileStore(t.TempDir())
 	if err := store.SaveSecret(context.Background(), sharedsecret.StoredSecret{
-		Ref:   coresecret.Plugin("slack", "work", "user_token"),
-		Kind:  coresecret.KindBearerToken,
+		Ref:   sharedsecret.Plugin("slack", "work", sharedsecret.Slot("user_token")),
+		Kind:  sharedsecret.KindBearerToken,
 		Value: "slack-user-token",
 	}); err != nil {
 		t.Fatalf("SaveSecret: %v", err)
@@ -20,11 +20,11 @@ func TestEvaluateUsesRequiredGroupSetupField(t *testing.T) {
 	status := Evaluate(context.Background(), store, Target{
 		Plugin:   "slack",
 		Instance: "work",
-		Methods: []coresecret.AuthMethodSpec{{
+		Methods: []auth.MethodSpec{{
 			Name:   "token",
-			Method: coresecret.AuthMethodStored,
-			Kind:   coresecret.KindBearerToken,
-			SetupFields: []coresecret.SetupFieldSpec{
+			Method: auth.MethodStored,
+			Kind:   sharedsecret.KindBearerToken,
+			SetupFields: []auth.FieldSpec{
 				{Slot: "bot_token", RequiredGroup: "api_token"},
 				{Slot: "user_token", RequiredGroup: "api_token"},
 			},
@@ -38,8 +38,8 @@ func TestEvaluateUsesRequiredGroupSetupField(t *testing.T) {
 func TestEvaluateReportsPartialRequiredGroupFields(t *testing.T) {
 	store := sharedsecret.NewFileStore(t.TempDir())
 	for _, secret := range []sharedsecret.StoredSecret{
-		{Ref: coresecret.Plugin("jira", "work", "email"), Kind: coresecret.KindBasic, Value: "user@example.invalid"},
-		{Ref: coresecret.Plugin("jira", "work", "token"), Kind: coresecret.KindBasic, Value: "api-token"},
+		{Ref: sharedsecret.Plugin("jira", "work", sharedsecret.Slot("email")), Kind: sharedsecret.KindBasic, Value: "user@example.invalid"},
+		{Ref: sharedsecret.Plugin("jira", "work", sharedsecret.Slot("token")), Kind: sharedsecret.KindBasic, Value: "api-token"},
 	} {
 		if err := store.SaveSecret(context.Background(), secret); err != nil {
 			t.Fatalf("SaveSecret: %v", err)
@@ -48,11 +48,11 @@ func TestEvaluateReportsPartialRequiredGroupFields(t *testing.T) {
 	status := Evaluate(context.Background(), store, Target{
 		Plugin:   "jira",
 		Instance: "work",
-		Methods: []coresecret.AuthMethodSpec{{
+		Methods: []auth.MethodSpec{{
 			Name:   "api_token",
-			Method: coresecret.AuthMethodStored,
-			Kind:   coresecret.KindBasic,
-			SetupFields: []coresecret.SetupFieldSpec{
+			Method: auth.MethodStored,
+			Kind:   sharedsecret.KindBasic,
+			SetupFields: []auth.FieldSpec{
 				{Slot: "email", Required: true},
 				{Slot: "token", Required: true},
 				{Slot: "cloud_id"},
@@ -75,14 +75,14 @@ func TestEvaluateReportsPartialRequiredGroupFields(t *testing.T) {
 
 func TestEvaluateUsesEnvironmentAlias(t *testing.T) {
 	env := fakeEnvironment{values: map[string]string{"GITLAB_TOKEN": "glpat-test"}}
-	status := Evaluate(context.Background(), coresecret.EnvResolver{Environment: env}, Target{
+	status := Evaluate(context.Background(), sharedsecret.EnvResolver{Environment: env}, Target{
 		Plugin:   "gitlab",
 		Instance: "gitlab",
-		Methods: []coresecret.AuthMethodSpec{{
+		Methods: []auth.MethodSpec{{
 			Name:   "personal_access_token",
-			Method: coresecret.AuthMethodEnv,
-			Kind:   coresecret.KindAPIKey,
-			Env:    coresecret.EnvSpec{Aliases: []string{"GITLAB_TOKEN"}},
+			Method: auth.MethodEnv,
+			Kind:   sharedsecret.KindAPIKey,
+			Env:    auth.EnvSpec{Aliases: []string{"GITLAB_TOKEN"}},
 		}},
 	})
 	if !status.Connected || status.Method != "token" {

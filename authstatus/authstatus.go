@@ -5,7 +5,8 @@ import (
 	"context"
 	"strings"
 
-	coresecret "github.com/fluxplane/fluxplane-auth/authsecret"
+	"github.com/fluxplane/fluxplane-auth"
+	"github.com/fluxplane/fluxplane-secret"
 )
 
 const (
@@ -17,7 +18,7 @@ const (
 type Target struct {
 	Plugin   string
 	Instance string
-	Methods  []coresecret.AuthMethodSpec
+	Methods  []auth.MethodSpec
 }
 
 // Status is a non-secret summary of one plugin instance's auth readiness.
@@ -39,7 +40,7 @@ type FieldStatus struct {
 }
 
 // Evaluate returns the first locally resolvable auth method for target.
-func Evaluate(ctx context.Context, resolver coresecret.Resolver, target Target) Status {
+func Evaluate(ctx context.Context, resolver secret.Resolver, target Target) Status {
 	plugin := strings.TrimSpace(target.Plugin)
 	instance := strings.TrimSpace(target.Instance)
 	if instance == "" {
@@ -73,7 +74,7 @@ func Evaluate(ctx context.Context, resolver coresecret.Resolver, target Target) 
 }
 
 // FriendlyMethodName returns the compact method label used in status summaries.
-func FriendlyMethodName(method coresecret.AuthMethodSpec) string {
+func FriendlyMethodName(method auth.MethodSpec) string {
 	name := strings.ToLower(strings.TrimSpace(method.Name))
 	switch name {
 	case "personal_access_token", "personal-access-token", "api_token", "api-token", "bearer":
@@ -83,11 +84,11 @@ func FriendlyMethodName(method coresecret.AuthMethodSpec) string {
 	}
 }
 
-func methodConfigured(ctx context.Context, resolver coresecret.Resolver, plugin, instance string, method coresecret.AuthMethodSpec) (bool, []FieldStatus) {
+func methodConfigured(ctx context.Context, resolver secret.Resolver, plugin, instance string, method auth.MethodSpec) (bool, []FieldStatus) {
 	if resolver == nil {
 		return false, nil
 	}
-	if method.Method == coresecret.AuthMethodStored && len(method.SetupFields) > 0 {
+	if method.Method == auth.MethodStored && len(method.SetupFields) > 0 {
 		return setupFieldsConfigured(ctx, resolver, plugin, instance, method.SetupFields)
 	}
 	if len(method.SetupFields) > 0 {
@@ -107,22 +108,22 @@ func methodConfigured(ctx context.Context, resolver coresecret.Resolver, plugin,
 	return false, nil
 }
 
-func setupFieldsConfigured(ctx context.Context, resolver coresecret.Resolver, plugin, instance string, fields []coresecret.SetupFieldSpec) (bool, []FieldStatus) {
+func setupFieldsConfigured(ctx context.Context, resolver secret.Resolver, plugin, instance string, fields []auth.FieldSpec) (bool, []FieldStatus) {
 	configured := map[string]bool{}
 	statuses := make([]FieldStatus, 0, len(fields))
 	anySet := false
 	for _, field := range fields {
-		name := strings.TrimSpace(coresecret.SetupFieldName(field))
+		name := strings.TrimSpace(string(field.Slot))
 		if name == "" {
 			continue
 		}
-		set := secretConfigured(ctx, resolver, coresecret.Plugin(plugin, instance, name)) || envConfigured(ctx, resolver, field.Env)
+		set := secretConfigured(ctx, resolver, secret.Plugin(plugin, instance, secret.Slot(name))) || envConfigured(ctx, resolver, field.Env)
 		configured[name] = set
 		anySet = anySet || set
 		statuses = append(statuses, FieldStatus{Name: name, Set: set})
 	}
 	for _, field := range fields {
-		name := strings.TrimSpace(coresecret.SetupFieldName(field))
+		name := strings.TrimSpace(string(field.Slot))
 		if field.Required && !configured[name] {
 			return false, statuses
 		}
@@ -143,22 +144,22 @@ func setupFieldsConfigured(ctx context.Context, resolver coresecret.Resolver, pl
 	return anySet, statuses
 }
 
-func refsForMethod(method coresecret.AuthMethodSpec) []coresecret.Ref {
+func refsForMethod(method auth.MethodSpec) []secret.Ref {
 	switch method.Method {
-	case coresecret.AuthMethodEnv:
+	case auth.MethodEnv:
 		return envRefs(method.Env)
-	case coresecret.AuthMethodOAuth2, coresecret.AuthMethodStored:
+	case auth.MethodOAuth2AuthCode, auth.MethodStored:
 		ref := method.Secret.Normalize()
 		if ref.ResourceName() == "" {
 			return nil
 		}
-		return []coresecret.Ref{ref}
+		return []secret.Ref{ref}
 	default:
 		return nil
 	}
 }
 
-func envConfigured(ctx context.Context, resolver coresecret.Resolver, spec coresecret.EnvSpec) bool {
+func envConfigured(ctx context.Context, resolver secret.Resolver, spec auth.EnvSpec) bool {
 	for _, ref := range envRefs(spec) {
 		if secretConfigured(ctx, resolver, ref) {
 			return true
@@ -167,9 +168,9 @@ func envConfigured(ctx context.Context, resolver coresecret.Resolver, spec cores
 	return false
 }
 
-func envRefs(spec coresecret.EnvSpec) []coresecret.Ref {
+func envRefs(spec auth.EnvSpec) []secret.Ref {
 	names := append([]string{spec.Name}, spec.Aliases...)
-	refs := make([]coresecret.Ref, 0, len(names))
+	refs := make([]secret.Ref, 0, len(names))
 	seen := map[string]bool{}
 	for _, name := range names {
 		name = strings.TrimSpace(name)
@@ -177,12 +178,12 @@ func envRefs(spec coresecret.EnvSpec) []coresecret.Ref {
 			continue
 		}
 		seen[name] = true
-		refs = append(refs, coresecret.Env(name))
+		refs = append(refs, secret.Env(name))
 	}
 	return refs
 }
 
-func secretConfigured(ctx context.Context, resolver coresecret.Resolver, ref coresecret.Ref) bool {
+func secretConfigured(ctx context.Context, resolver secret.Resolver, ref secret.Ref) bool {
 	material, ok, err := resolver.ResolveSecret(ctx, ref)
 	return err == nil && ok && strings.TrimSpace(string(material.Value)) != ""
 }
@@ -196,11 +197,11 @@ func anyFieldSet(fields []FieldStatus) bool {
 	return false
 }
 
-func requiredGroups(fields []coresecret.SetupFieldSpec) map[string][]string {
+func requiredGroups(fields []auth.FieldSpec) map[string][]string {
 	groups := map[string][]string{}
 	for _, field := range fields {
 		group := strings.TrimSpace(field.RequiredGroup)
-		name := strings.TrimSpace(coresecret.SetupFieldName(field))
+		name := strings.TrimSpace(string(field.Slot))
 		if group == "" || name == "" {
 			continue
 		}
