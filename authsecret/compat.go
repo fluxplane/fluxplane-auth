@@ -18,6 +18,7 @@ type StoreRef = secret.StoreRef
 type Ref = secret.Ref
 type Material = secret.Material
 type Placeholder = secret.Placeholder
+type Environment = secret.Environment
 type Resolver = secret.Resolver
 type ResolverFunc = secret.ResolverFunc
 type EnvResolver = secret.EnvResolver
