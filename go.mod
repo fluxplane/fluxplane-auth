@@ -3,7 +3,7 @@ module github.com/fluxplane/fluxplane-auth
 go 1.26.1
 
 require (
-	github.com/fluxplane/fluxplane-policy v0.1.1
+	github.com/fluxplane/fluxplane-policy v0.2.0
 	github.com/fluxplane/fluxplane-secret v0.2.0
 )
 
